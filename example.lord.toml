@@ -1,0 +1,10 @@
+
+
+[set-dns]
+src-users = [ 'bitsneak' ]
+var.server-ip = 'ip-addr'
+commands = [
+	'setpriv -d',
+	'echo nameserver {server-ip} > /etc/resolv.conf'
+]
+
