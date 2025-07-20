@@ -1,0 +1,24 @@
+[package]
+name = "lord"
+version = "1.0.0"
+edition = "2021"
+keywords = []
+authors = [ "Nathan ROYER <nathan.royer.pro@gmail.com>" ]
+repository = "https://github.com/NathanRoyer/lord"
+description = "sudo alternative"
+categories = [ "command-line-utilities" ]
+license = "MIT"
+
+[[bin]]
+name = "lord"
+path = "main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+
+[dependencies]
+toml = { version = "0.9", default-features = false, features = ["serde", "parse"] }
+nix = { version = "0.30", features = ["user", "process", "signal"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
+litemap = { version = "0.8", features = ["serde"] }

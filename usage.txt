@@ -1,0 +1,3 @@
+usage: lord [APPLET] [key=value...]
+
+applet config: /etc/lord.toml
