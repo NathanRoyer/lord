@@ -1,10 +1,12 @@
+base-env.PATH = '/usr/bin:/bin:/sbin'
 
+[debug]
+open-bar = true
+var.debug = 'number:0-1'
+env.CFLAGS = '-DDEBUG={debug}'
+commands = [ 'env', 'setpriv -d' ]
 
 [set-dns]
-src-users = [ 'bitsneak' ]
+src-groups = [ 'punks' ]
 var.server-ip = 'ip-addr'
-commands = [
-	'setpriv -d',
-	'echo nameserver {server-ip} > /etc/resolv.conf'
-]
-
+commands = [ 'echo nameserver {server-ip} > /etc/resolv.conf' ]

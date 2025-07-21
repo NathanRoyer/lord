@@ -24,14 +24,23 @@ const DEFAULT_SHELL_PATH: &str = "/bin/sh";
 #[serde(rename_all = "kebab-case")]
 struct AppletConfig {
     commands: Vec<String>,
+
     #[serde(default)]
     src_users: Vec<String>,
+
     #[serde(default)]
     src_groups: Vec<String>,
+
+    // allow all users to run this
+    #[serde(default)]
+    open_bar: bool,
+
     #[serde(default)]
     var: LiteMap<String, String>,
+
     #[serde(default)]
     env: LiteMap<String, String>,
+
     #[serde(default)]
     env_keep: Vec<String>,
 }
@@ -40,9 +49,10 @@ struct AppletConfig {
 #[serde(rename_all = "kebab-case")]
 struct GlobalConfig {
     include: Option<String>,
+    shell: Option<String>,
+
     #[serde(default)]
     base_env: LiteMap<String, String>,
-    shell: Option<String>,
 
     #[serde(flatten)]
     applets: LiteMap<String, AppletConfig>,
@@ -89,6 +99,10 @@ fn read_config() -> Result<GlobalConfig, &'static str> {
 }
 
 fn check_src_user(config: &AppletConfig) -> Result<bool, &'static str> {
+    if config.open_bar {
+        return Ok(true);
+    }
+
     let Ok(Some(user)) = User::from_uid(getuid()) else {
         return Err("failed to identify source user");
     };
@@ -128,7 +142,9 @@ fn main() -> Result<(), &'static str> {
         return Err("unknown applet");
     };
 
-    check_src_user(applet_cfg)?;
+    if !check_src_user(applet_cfg)? {
+        return Err("unauthorized");
+    }
 
     if setuid(current_euid).is_err() {
         return Err("failed to setuid");
