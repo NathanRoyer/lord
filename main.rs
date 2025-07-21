@@ -15,6 +15,7 @@ use nix::unistd::{geteuid, getuid, setuid, User, Group};
 const CONFIG_FILE: &str = "/etc/lord.toml";
 const NO_SPEC_OPT: &str = "missing spec option";
 const INV_SPEC_OPT: &str = "invalid spec option";
+const DEFAULT_SHELL_PATH: &str = "/bin/sh";
 
 
 /* CONFIG STRUCT */
@@ -29,12 +30,19 @@ struct AppletConfig {
     src_groups: Vec<String>,
     #[serde(default)]
     var: LiteMap<String, String>,
+    #[serde(default)]
+    env: LiteMap<String, String>,
+    #[serde(default)]
+    env_keep: Vec<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct GlobalConfig {
     include: Option<String>,
+    #[serde(default)]
+    base_env: LiteMap<String, String>,
+    shell: Option<String>,
 
     #[serde(flatten)]
     applets: LiteMap<String, AppletConfig>,
@@ -54,14 +62,22 @@ fn read_config_dir(dir_path: &str, config_str: &mut String) -> io::Result<()> {
     Ok(())
 }
 
+fn toml_parse(config_str: &str, base_err: &'static str) -> Result<GlobalConfig, &'static str> {
+    match toml::from_str(config_str) {
+        Ok(config) => Ok(config),
+        Err(error) => {
+            println!("config: {error:?}");
+            Err(base_err)
+        }
+    }
+}
+
 fn read_config() -> Result<GlobalConfig, &'static str> {
     let Ok(mut config_str) = fs::read_to_string(CONFIG_FILE) else {
         return Err("failed to read global config file");
     };
 
-    let Ok(global) = toml::from_str::<GlobalConfig>(&config_str) else {
-        return Err("failed to parse global config file");
-    };
+    let global = toml_parse(&config_str, "failed to parse base config file")?;
 
     if let Some(dir_path) = &global.include {
         let Ok(()) = read_config_dir(&dir_path, &mut config_str) else {
@@ -69,10 +85,7 @@ fn read_config() -> Result<GlobalConfig, &'static str> {
         };
     }
 
-    match toml::from_str(&config_str) {
-        Ok(config) => Ok(config),
-        Err(_) => Err("failed to parse joined config file"),
-    }
+    toml_parse(&config_str, "failed to parse joined config file")
 }
 
 fn check_src_user(config: &AppletConfig) -> Result<bool, &'static str> {
@@ -126,7 +139,7 @@ fn main() -> Result<(), &'static str> {
 
     while let Some(argument) = argv.next() {
         let Some((key, value)) = argument.split_once('=') else {
-            return Err("malformated argument (should be key=value");
+            return Err("malformated argument (should be key=value)");
         };
 
         let Some(spec) = applet_cfg.var.get(key) else {
@@ -149,35 +162,45 @@ fn main() -> Result<(), &'static str> {
         return Err("missing argument");
     }
 
+    let mut env: LiteMap<String, String> = config.base_env.clone();
     let mut commands = Vec::new();
 
-    for in_cmd in &applet_cfg.commands {
-        let mut in_cmd = in_cmd.as_str();
-        let mut command = String::new();
+    for template in &applet_cfg.commands {
+        commands.push(resolve_vars(&variables, &template)?);
+    }
 
-        while let Some((prefix, name_and_rest)) = in_cmd.split_once('{') {
-            command += prefix;
+    for (key, template) in &applet_cfg.env {
+        let value = resolve_vars(&variables, &template)?;
+        env.insert(key.into(), value);
+    }
 
-            if prefix.ends_with('\\') {
-                command.push('{');
-                in_cmd = name_and_rest;
-            } else if let Some((var_name, rest)) = name_and_rest.split_once('}') {
-                let Some(value) = variables.get(var_name) else {
-                    println!("no def: {var_name}");
-                    return Err("missing variable definition");
-                };
-
-                command += value;
-                in_cmd = rest;
-            }
+    for key in &applet_cfg.env_keep {
+        match env::var(key) {
+            Ok(value) => _ = env.insert(key.into(), value),
+            Err(env::VarError::NotPresent) => (),
+            Err(error) => {
+                println!("env error: {error:?}");
+                return Err("failed to import env value");
+            },
         }
+    }
 
-        command += in_cmd;
-        commands.push(command);
+    if !env.contains_key("PATH") {
+        return Err("no PATH in env");
+    };
+
+    let shell_path = match &config.shell {
+        Some(path) => path.as_str(),
+        None => DEFAULT_SHELL_PATH,
+    };
+
+    if !shell_path.starts_with('/') {
+        return Err("please provide an absolute shell path");
     }
 
     for command in commands {
-        let mut shell = Command::new("/bin/sh");
+        let mut shell = Command::new(&shell_path);
+        shell.env_clear().envs(&env);
         shell.args(["-c", &command]);
 
         match shell.spawn() {
@@ -192,8 +215,34 @@ fn main() -> Result<(), &'static str> {
     Ok(())
 }
 
+fn resolve_vars(variables: &LiteMap<String, String>, mut template: &str) -> Result<String, &'static str> {
+    let mut command = String::new();
+
+    while let Some((prefix, name_and_rest)) = template.split_once('{') {
+        command += prefix;
+
+        if prefix.ends_with('\\') {
+            command.push('{');
+            template = name_and_rest;
+        } else if let Some((var_name, rest)) = name_and_rest.split_once('}') {
+            let Some(value) = variables.get(var_name) else {
+                println!("no def: {var_name}");
+                return Err("missing variable definition");
+            };
+
+            command += value;
+            template = rest;
+        }
+    }
+
+    command += template;
+    Ok(command)
+}
+
 // canonicalizes a unix path without it needing to exist
-fn blind_canon(path: &mut String) -> Result<(), &'static str> {
+fn blind_canon(value: &str) -> Result<String, &'static str> {
+    let mut path = String::from(value);
+
     let Ok(cwd) = env::current_dir() else {
         return Err("failed to read current directory");
     };
@@ -203,12 +252,12 @@ fn blind_canon(path: &mut String) -> Result<(), &'static str> {
     };
 
     if !path.starts_with('/') {
-        *path = format!("{cwd}/{path}");
+        path = format!("{cwd}/{path}");
     }
 
     for token in ["//", "/./"] {
         while let Some((before, after)) = path.split_once(token) {
-            *path = format!("{before}/{after}");
+            path = format!("{before}/{after}");
         }
     }
 
@@ -217,10 +266,10 @@ fn blind_canon(path: &mut String) -> Result<(), &'static str> {
             return Err("invalid path");
         };
 
-        *path = format!("{parent}/{after}");
+        path = format!("{parent}/{after}");
     }
     
-    Ok(())
+    Ok(path)
 }
 
 fn fs_check(
@@ -230,8 +279,7 @@ fn fs_check(
     direct_only: bool,
     value: &str,
 ) -> Result<bool, &'static str> {
-    let mut str_path = String::from(value);
-    blind_canon(&mut str_path)?;
+    let str_path = blind_canon(value)?;
     let path = path::Path::new(&str_path);
 
     if let Some(existence) = existence_check {
@@ -245,7 +293,7 @@ fn fs_check(
             Some(parent) => parent.to_str() == Some(ancestor),
             None => return Err("failed to identify path parent"),
         }
-        false => str_path.starts_with(&str_path),
+        false => str_path.starts_with(&ancestor),
     };
 
     if !parent_ok {
@@ -256,6 +304,44 @@ fn fs_check(
         return Ok(true);
     };
 
+    match fs::metadata(path) {
+        Ok(md) => Ok(file_type_check(&md.file_type())),
+        Err(_) => Ok(false),
+    }
+}
+
+fn find_entry(dir_path: &str, entry_name: &str) -> io::Result<bool> {
+    for entry in fs::read_dir(dir_path)? {
+        let name = entry?.file_name();
+
+        if Some(entry_name) == name.to_str() {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn entry_check(
+    file_type_check: Option<fn(&fs::FileType) -> bool>,
+    dir_path: &str,
+    entry: &str,
+) -> Result<bool, &'static str> {
+    match find_entry(dir_path, entry) {
+        Ok(true) => (),
+        Ok(false) => return Ok(false),
+        Err(error) => {
+            println!("path: {dir_path:?}");
+            println!("read_dir: {error:?}");
+            return Err("failed to read directory");
+        },
+    }
+
+    let Some(file_type_check) = file_type_check else {
+        return Ok(true);
+    };
+
+    let path = format!("{dir_path}/{entry}");
     match fs::metadata(path) {
         Ok(md) => Ok(file_type_check(&md.file_type())),
         Err(_) => Ok(false),
@@ -446,10 +532,7 @@ fn parse_opt(mut spec: &str, value: &str) -> Result<(), &'static str> {
             let group = spec_opt.ok_or(NO_SPEC_OPT)?;
             is_user_member_of_group(group, value).ok_or(INV_SPEC_OPT)?
         }
-        "interface" => {
-            let path = format!("/sys/class/net/{value}");
-            fs_check(None, Some(true), "/sys/class/net/", true, &path)?
-        },
+        "interface" => entry_check(None, "/sys/class/net/", value)?,
         "hex-number" => {
             let value = value.strip_prefix("0x").unwrap_or(value);
             match i64::from_str_radix(value, 16) {
@@ -483,6 +566,14 @@ fn parse_opt(mut spec: &str, value: &str) -> Result<(), &'static str> {
         "ipv6-addr" => valid_ip(value, Some(true), false),
         "ip-cidr" => valid_ip(value, None, true),
         "ip-addr" => valid_ip(value, None, false),
+
+        "node-of" => entry_check(None, spec_opt.ok_or(NO_SPEC_OPT)?, value)?,
+        "file-of" => entry_check(Some(FileType::is_file), spec_opt.ok_or(NO_SPEC_OPT)?, value)?,
+        "link-of" => entry_check(Some(FileType::is_symlink), spec_opt.ok_or(NO_SPEC_OPT)?, value)?,
+        "dir-of" => entry_check(Some(FileType::is_dir), spec_opt.ok_or(NO_SPEC_OPT)?, value)?,
+        "socket-of" => entry_check(Some(FileType::is_socket), spec_opt.ok_or(NO_SPEC_OPT)?, value)?,
+        "chardev-of" => entry_check(Some(FileType::is_char_device), spec_opt.ok_or(NO_SPEC_OPT)?, value)?,
+        "blockdev-of" => entry_check(Some(FileType::is_block_device), spec_opt.ok_or(NO_SPEC_OPT)?, value)?,
 
         "node-in" => fs_check(None, Some(true), spec_opt.ok_or(NO_SPEC_OPT)?, true, value)?,
         "file-in" => fs_check(Some(FileType::is_file), Some(true), spec_opt.ok_or(NO_SPEC_OPT)?, true, value)?,
