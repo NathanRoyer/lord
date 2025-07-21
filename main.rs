@@ -7,7 +7,7 @@ use std::fs::FileType;
 use serde::Deserialize;
 use litemap::LiteMap;
 
-use nix::unistd::{geteuid, getuid, setuid, User, Group};
+use nix::unistd::{geteuid, getegid, getuid, setuid, setgid, User, Group};
 
 
 /* CONSTANTS */
@@ -133,7 +133,16 @@ fn main() -> Result<(), &'static str> {
 
     let current_euid = geteuid();
     if !current_euid.is_root() {
-        return Err("not root! is the set-uid bit set?");
+        return Err("bad UID! is the set-uid bit set?");
+    }
+
+    let Ok(Some(root_user)) = User::from_uid(current_euid) else {
+        return Err("could not find root user account");
+    };
+
+    let current_egid = getegid();
+    if current_egid != root_user.gid {
+        return Err("bad GID! is the set-git bit set?");
     }
 
     let config = read_config()?;
@@ -147,7 +156,11 @@ fn main() -> Result<(), &'static str> {
     }
 
     if setuid(current_euid).is_err() {
-        return Err("failed to setuid");
+        return Err("failed to set UID");
+    }
+
+    if setgid(current_egid).is_err() {
+        return Err("failed to set GID");
     }
 
     let mut variables: LiteMap<String, String> = LiteMap::new();
